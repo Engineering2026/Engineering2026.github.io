@@ -1,0 +1,403 @@
+# pacman_clone.py
+import pygame
+import random
+from enum import Enum
+
+# ----- Configuration -----
+SCREEN_WIDTH = 640
+SCREEN_HEIGHT = 640
+TILE_SIZE = 32
+ROWS = SCREEN_HEIGHT // TILE_SIZE
+COLS = SCREEN_WIDTH // TILE_SIZE
+FPS = 60
+
+PLAYER_SPEED = 3
+GHOST_SPEED = 2
+
+PLAYER_COLOR = (255, 220, 0)
+PELLET_COLOR = (255, 255, 255)
+GHOST_COLORS = [(200, 30, 30), (200, 120, 10), (10, 180, 180), (180, 10, 180)]
+WALL_COLOR = (20, 20, 120)
+BG_COLOR = (0, 0, 0)
+TEXT_COLOR = (255, 255, 255)
+
+# ----- Helper Types -----
+class Direction(Enum):
+    UP = (0, -1)
+    DOWN = (0, 1)
+    LEFT = (-1, 0)
+    RIGHT = (1, 0)
+    NONE = (0, 0)
+
+# ----- Maze -----
+class Maze:
+    def __init__(self, rows, cols):
+        self.rows = rows
+        self.cols = cols
+        self.grid = [[0 for _ in range(cols)] for _ in range(rows)]
+        self._generate_border_walls()
+        self._generate_internal_walls()
+        self.wall_rects = self._compute_wall_rects()
+
+    def _generate_border_walls(self):
+        for r in range(self.rows):
+            self.grid[r][0] = 1
+            self.grid[r][self.cols - 1] = 1
+        for c in range(self.cols):
+            self.grid[0][c] = 1
+            self.grid[self.rows - 1][c] = 1
+
+    def _generate_internal_walls(self):
+        for r in range(2, self.rows - 2):
+            if r % 2 == 0:
+                for c in range(2, self.cols - 2, 3):
+                    self.grid[r][c] = 1
+                    if c + 1 < self.cols - 2:
+                        self.grid[r][c + 1] = 1
+
+        center_r = self.rows // 2
+        center_c = self.cols // 2
+        for r in range(center_r - 1, center_r + 2):
+            for c in range(center_c - 2, center_c + 3):
+                self.grid[r][c] = 1
+
+    def _compute_wall_rects(self):
+        rects = []
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if self.grid[r][c] == 1:
+                    rects.append(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
+        return rects
+
+    def is_wall(self, row, col):
+        if 0 <= row < self.rows and 0 <= col < self.cols:
+            return self.grid[row][col] == 1
+        return True
+
+    def draw(self, surface):
+        for rect in self.wall_rects:
+            pygame.draw.rect(surface, WALL_COLOR, rect)
+
+# ----- Pellet -----
+class Pellet:
+    def __init__(self, row, col):
+        self.row = row
+        self.col = col
+        self.radius = 3
+        self.eaten = False
+
+    def draw(self, surface):
+        if not self.eaten:
+            x = self.col * TILE_SIZE + TILE_SIZE // 2
+            y = self.row * TILE_SIZE + TILE_SIZE // 2
+            pygame.draw.circle(surface, PELLET_COLOR, (x, y), self.radius)
+
+# ----- Player -----
+class Player:
+    def __init__(self, start_row, start_col):
+        self.start_row = start_row
+        self.start_col = start_col
+        self.radius = TILE_SIZE // 2 - 3
+        self.reset()
+
+    def reset(self):
+        self.row = self.start_row
+        self.col = self.start_col
+        self.x = self.col * TILE_SIZE + TILE_SIZE // 2
+        self.y = self.row * TILE_SIZE + TILE_SIZE // 2
+        self.speed = PLAYER_SPEED
+        self.direction = Direction.NONE
+        self.next_direction = Direction.NONE
+        self.lives = getattr(self, "lives", 3)
+        self.score = getattr(self, "score", 0)
+
+    def set_direction(self, direction):
+        self.next_direction = direction
+
+    def _tile_for(self, x, y):
+        return int(x // TILE_SIZE), int(y // TILE_SIZE)
+
+    def _can_move_to_tile(self, maze, new_x, new_y):
+        new_col, new_row = self._tile_for(new_x, new_y)
+        if 0 <= new_row < maze.rows and 0 <= new_col < maze.cols:
+            return not maze.is_wall(new_row, new_col)
+        return False
+
+    def try_change_direction(self, maze):
+        if self.next_direction == Direction.NONE:
+            return
+
+        dx, dy = self.next_direction.value
+        new_x = self.x + dx * self.speed
+        new_y = self.y + dy * self.speed
+
+        if self._can_move_to_tile(maze, new_x, new_y):
+            self.direction = self.next_direction
+
+    def update(self, maze):
+        self.try_change_direction(maze)
+
+        if self.direction == Direction.NONE:
+            return
+
+        dx, dy = self.direction.value
+        new_x = self.x + dx * self.speed
+        new_y = self.y + dy * self.speed
+
+        if self._can_move_to_tile(maze, new_x, new_y):
+            self.x = new_x
+            self.y = new_y
+
+        self.col = int(self.x // TILE_SIZE)
+        self.row = int(self.y // TILE_SIZE)
+
+    def draw(self, surface):
+        pygame.draw.circle(surface, PLAYER_COLOR, (int(self.x), int(self.y)), self.radius)
+
+    def get_center(self):
+        return (self.x, self.y)
+
+# ----- Ghost -----
+class Ghost:
+    def __init__(self, start_row, start_col, color):
+        self.start_row = start_row
+        self.start_col = start_col
+        self.color = color
+        self.radius = TILE_SIZE // 2 - 6
+        self.reset()
+
+    def reset(self):
+        self.row = self.start_row
+        self.col = self.start_col
+        self.x = self.col * TILE_SIZE + TILE_SIZE // 2
+        self.y = self.row * TILE_SIZE + TILE_SIZE // 2
+        self.speed = GHOST_SPEED
+        self.direction = random.choice([Direction.UP, Direction.DOWN, Direction.LEFT, Direction.RIGHT])
+
+    def _tile_for(self, x, y):
+        return int(x // TILE_SIZE), int(y // TILE_SIZE)
+
+    def update(self, maze, player):
+        best_dir = None
+        best_dist = float('inf')
+
+        for d in [Direction.UP, Direction.DOWN, Direction.LEFT, Direction.RIGHT]:
+            dx, dy = d.value
+            nx = self.x + dx * self.speed
+            ny = self.y + dy * self.speed
+            ncol, nrow = self._tile_for(nx, ny)
+            if 0 <= nrow < maze.rows and 0 <= ncol < maze.cols and not maze.is_wall(nrow, ncol):
+                dist = (player.x - nx) ** 2 + (player.y - ny) ** 2
+                if dist < best_dist:
+                    best_dist = dist
+                    best_dir = d
+
+        if best_dir:
+            self.direction = best_dir
+
+        dx, dy = self.direction.value
+        new_x = self.x + dx * self.speed
+        new_y = self.y + dy * self.speed
+        ncol, nrow = self._tile_for(new_x, new_y)
+
+        if 0 <= nrow < maze.rows and 0 <= ncol < maze.cols and not maze.is_wall(nrow, ncol):
+            self.x = new_x
+            self.y = new_y
+        else:
+            valid_dirs = []
+            for d in [Direction.UP, Direction.DOWN, Direction.LEFT, Direction.RIGHT]:
+                dx2, dy2 = d.value
+                nx2 = self.x + dx2 * self.speed
+                ny2 = self.y + dy2 * self.speed
+                ccol, crow = self._tile_for(nx2, ny2)
+                if 0 <= crow < maze.rows and 0 <= ccol < maze.cols and not maze.is_wall(crow, ccol):
+                    valid_dirs.append(d)
+            if valid_dirs:
+                self.direction = random.choice(valid_dirs)
+
+        self.col = int(self.x // TILE_SIZE)
+        self.row = int(self.y // TILE_SIZE)
+
+    def draw(self, surface):
+        rect = pygame.Rect(int(self.x - self.radius), int(self.y - self.radius), self.radius * 2, self.radius * 2)
+        pygame.draw.rect(surface, self.color, rect, border_radius=6)
+
+    def get_center(self):
+        return (self.x, self.y)
+
+# ----- Collision Utility -----
+def circles_collide(x1, y1, r1, x2, y2, r2):
+    dx = x1 - x2
+    dy = y1 - y2
+    return dx * dx + dy * dy <= (r1 + r2) * (r1 + r2)
+
+# ----- Game -----
+class Game:
+    def __init__(self):
+        pygame.init()
+
+        # ----- AUDIO -----
+        pygame.mixer.init()
+
+        pygame.mixer.music.load("music/background_music.mp3")
+        pygame.mixer.music.set_volume(0.5)
+        pygame.mixer.music.play(-1)
+
+        self.eat_sound = pygame.mixer.Sound("music/eat.mp3")
+        self.hit_sound = pygame.mixer.Sound("music/hit.mp3")
+        self.game_over_sound = pygame.mixer.Sound("music/game_over.mp3")
+        # No win music
+        # -----------------
+
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        pygame.display.set_caption("Pac‑Man (Full Audio + Win Screen)")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont("Arial", 18)
+
+        self.maze = Maze(ROWS, COLS)
+
+        center_r = ROWS // 2
+        center_c = COLS // 2
+        spawn_r, spawn_c = self._find_nearest_empty(center_r, center_c)
+        self.player = Player(spawn_r, spawn_c)
+
+        self.ghost_spawns = [(1,1), (1, self.maze.cols - 2), (self.maze.rows - 2, 1), (self.maze.rows - 2, self.maze.cols - 2)]
+        self.ghosts = [Ghost(r, c, GHOST_COLORS[i % len(GHOST_COLORS)]) for i, (r, c) in enumerate(self.ghost_spawns)]
+
+        self.pellets = []
+        exclusions = {(self.player.start_row, self.player.start_col)} | set(self.ghost_spawns)
+        for r in range(1, self.maze.rows - 1):
+            for c in range(1, self.maze.cols - 1):
+                if not self.maze.is_wall(r, c) and (r, c) not in exclusions:
+                    self.pellets.append(Pellet(r, c))
+
+        self.running = True
+
+    def _find_nearest_empty(self, r, c):
+        if not self.maze.is_wall(r, c):
+            return r, c
+        max_radius = max(self.maze.rows, self.maze.cols)
+        for radius in range(1, max_radius):
+            for dr in range(-radius, radius + 1):
+                for dc in range(-radius, radius + 1):
+                    nr = r + dr
+                    nc = c + dc
+                    if 0 <= nr < self.maze.rows and 0 <= nc < self.maze.cols:
+                        if not self.maze.is_wall(nr, nc):
+                            return nr, nc
+        return 1, 1
+
+    def handle_input(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.running = False
+
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_UP]:
+            self.player.set_direction(Direction.UP)
+        elif keys[pygame.K_DOWN]:
+            self.player.set_direction(Direction.DOWN)
+        elif keys[pygame.K_LEFT]:
+            self.player.set_direction(Direction.LEFT)
+        elif keys[pygame.K_RIGHT]:
+            self.player.set_direction(Direction.RIGHT)
+
+    def update(self):
+        self.player.update(self.maze)
+
+        # ----- Pellet collisions -----
+        all_eaten = True
+        for pellet in self.pellets:
+            if not pellet.eaten:
+                all_eaten = False
+            if not pellet.eaten and pellet.row == self.player.row and pellet.col == self.player.col:
+                pellet.eaten = True
+                self.player.score += 10
+                self.eat_sound.play()
+
+        # Win condition
+        if all_eaten:
+            self.running = False
+            self.show_win_screen()
+            return
+
+        # ----- Ghost collisions -----
+        px, py = self.player.get_center()
+
+        for ghost in self.ghosts:
+            gx, gy = ghost.get_center()
+
+            if circles_collide(px, py, self.player.radius, gx, gy, ghost.radius):
+                self.hit_sound.play()
+                self.player.lives -= 1
+                pygame.time.delay(400)
+
+                self.player.reset()
+
+                for j, g in enumerate(self.ghosts):
+                    g.start_row, g.start_col = self.ghost_spawns[j]
+                    g.reset()
+
+                if self.player.lives <= 0:
+                    self.running = False
+                    self.show_game_over()
+                return
+
+        # Update ghosts
+        for ghost in self.ghosts:
+            ghost.update(self.maze, self.player)
+
+    def draw_ui(self):
+        score_surf = self.font.render(f"Score: {self.player.score}", True, TEXT_COLOR)
+        lives_surf = self.font.render(f"Lives: {self.player.lives}", True, TEXT_COLOR)
+        self.screen.blit(score_surf, (10, 10))
+        self.screen.blit(lives_surf, (10, 30))
+
+    def run(self):
+        while self.running:
+            self.clock.tick(FPS)
+            self.handle_input()
+            self.update()
+
+            self.screen.fill(BG_COLOR)
+            self.maze.draw(self.screen)
+            for pellet in self.pellets:
+                pellet.draw(self.screen)
+            self.player.draw(self.screen)
+            for ghost in self.ghosts:
+                ghost.draw(self.screen)
+            self.draw_ui()
+
+            pygame.display.flip()
+
+        pygame.quit()
+
+    def show_game_over(self):
+        self.game_over_sound.play()
+
+        go_font = pygame.font.SysFont("Arial", 36)
+        text = go_font.render("Game Over", True, (255, 50, 50))
+        score_text = self.font.render(f"Final Score: {self.player.score}", True, TEXT_COLOR)
+        self.screen.fill(BG_COLOR)
+        self.screen.blit(text, (SCREEN_WIDTH // 2 - text.get_width() // 2, SCREEN_HEIGHT // 2 - 40))
+        self.screen.blit(score_text, (SCREEN_WIDTH // 2 - score_text.get_width() // 2, SCREEN_HEIGHT // 2 + 10))
+        pygame.display.flip()
+        pygame.time.delay(2500)
+
+    def show_win_screen(self):
+        win_font = pygame.font.SysFont("Arial", 36)
+        text = win_font.render("Congratulations! You Won!", True, (50, 255, 50))
+        score_text = self.font.render(f"Final Score: {self.player.score}", True, TEXT_COLOR)
+        self.screen.fill(BG_COLOR)
+        self.screen.blit(text, (SCREEN_WIDTH // 2 - text.get_width() // 2, SCREEN_HEIGHT // 2 - 40))
+        self.screen.blit(score_text, (SCREEN_WIDTH // 2 - score_text.get_width() // 2, SCREEN_HEIGHT // 2 + 10))
+        pygame.display.flip()
+        pygame.time.delay(2500)
+
+# ----- Entry Point -----
+if __name__ == "__main__":
+    game = Game()
+    game.run()
